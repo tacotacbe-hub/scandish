@@ -1,39 +1,87 @@
 /**
  * @param { import("knex").Knex } knex
- * @returns { Promise<void> }
  */
-exports.up = function(knex) {
-  
+exports.up = async function up(knex) {
+  await knex.schema.createTable('users', (table) => {
+    table.increments('id').primary();
+    table.string('name').notNullable();
+    table.string('email').notNullable().unique();
+    table.string('password_hash').notNullable();
+    table.timestamps(true, true);
+  });
+
+  await knex.schema.createTable('listings', (table) => {
+    table.increments('id').primary();
+    table.string('title').notNullable();
+    table.text('description');
+    table.decimal('price', 10, 2).notNullable();
+    table.string('brand').notNullable();
+    table.string('location').notNullable();
+    table.string('image_url');
+    table
+      .integer('seller_id')
+      .unsigned()
+      .notNullable()
+      .references('id')
+      .inTable('users')
+      .onDelete('CASCADE');
+    table.timestamps(true, true);
+  });
+
+  await knex.schema.createTable('saved_listings', (table) => {
+    table.increments('id').primary();
+    table
+      .integer('user_id')
+      .unsigned()
+      .notNullable()
+      .references('id')
+      .inTable('users')
+      .onDelete('CASCADE');
+    table
+      .integer('listing_id')
+      .unsigned()
+      .notNullable()
+      .references('id')
+      .inTable('listings')
+      .onDelete('CASCADE');
+    table.unique(['user_id', 'listing_id']);
+    table.timestamps(true, true);
+  });
+
+  await knex.schema.createTable('messages', (table) => {
+    table.increments('id').primary();
+    table
+      .integer('listing_id')
+      .unsigned()
+      .notNullable()
+      .references('id')
+      .inTable('listings')
+      .onDelete('CASCADE');
+    table
+      .integer('sender_id')
+      .unsigned()
+      .notNullable()
+      .references('id')
+      .inTable('users')
+      .onDelete('CASCADE');
+    table
+      .integer('recipient_id')
+      .unsigned()
+      .notNullable()
+      .references('id')
+      .inTable('users')
+      .onDelete('CASCADE');
+    table.text('content').notNullable();
+    table.timestamps(true, true);
+  });
 };
 
 /**
  * @param { import("knex").Knex } knex
- * @returns { Promise<void> }
  */
-exports.down = function(knex) {
-  
-};
-// backend/migrations/votre_nom_de_fichier_date.js
-
-exports.up = function(knex) {
-  // Crée la table 'annonces' si elle n'existe pas
-  return knex.schema.createTable('annonces', (table) => {
-    table.increments('id').primary(); // ID unique auto-incrémenté
-    table.string('titre').notNullable();
-    table.decimal('prix', 8, 2).notNullable(); // Prix avec 2 décimales
-    table.string('localisation').notNullable();
-    table.string('imageUrl').defaultTo('https://placehold.co/300x250/E5E5E5/333333?text=Article');
-    table.string('statut').defaultTo('Actif');
-    
-    // Simuler le vendeur
-    table.integer('vendeur_id').notNullable();
-    table.string('vendeur_nom').notNullable();
-
-    table.timestamps(true, true); // colonnes created_at et updated_at
-  });
-};
-
-exports.down = function(knex) {
-  // Inverse l'opération (pour annuler la migration)
-  return knex.schema.dropTable('annonces');
+exports.down = async function down(knex) {
+  await knex.schema.dropTableIfExists('messages');
+  await knex.schema.dropTableIfExists('saved_listings');
+  await knex.schema.dropTableIfExists('listings');
+  await knex.schema.dropTableIfExists('users');
 };

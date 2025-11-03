@@ -1,148 +1,580 @@
-// backend/server.js
-
-// 1. Dépendances
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 require('dotenv').config();
 
-// --- Initialisation de Knex et de la DB ---
-// Utilise le knexfile que nous avons configuré pour se connecter à SQLite en local.
-const knex = require('knex')(require('./knexfile').development); 
-// ----------------------------------------------------
+const knexConfig = require('./knexfile');
+const knex = require('knex')(knexConfig.development);
 
-// 2. Initialisation
 const app = express();
-// PORT utilisé par Render (process.env.PORT) ou 3000 en local
-const PORT = process.env.PORT || 3000; 
+const PORT = process.env.PORT || 3000;
+const TOKEN_SECRET = process.env.TOKEN_SECRET || 'super-secret-development-key';
+const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 jours
+const ALLOWED_BRANDS = ['IKEA', 'JYSK'];
 
-// 3. Middlewares
-app.use(express.json()); 
-app.use(cors()); 
+app.use(express.json());
+app.use(cors());
 
-// --- Liste de secours (Fallback) en cas de problème de DB sur Render ---
-const FALLBACK_ANNONCES = [
-    { id: 999, titre: 'Article de Secours 1 (Render)', prix: 10.00, localisation: 'Online', imageUrl: 'https://placehold.co/300x250/A3C1C9/333333?text=Article+Secours', vendeur: { id: 999, nom: 'Render Fallback' } },
-    { id: 998, titre: 'Article de Secours 2 (Render)', prix: 20.00, localisation: 'Online', imageUrl: 'https://placehold.co/300x250/B9C7B3/333333?text=Article+Secours', vendeur: { id: 998, nom: 'Render Fallback' } }
-];
-// ---------------------------------------------------------------------
+function buildUserResponse(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    createdAt: user.created_at,
+    updatedAt: user.updated_at,
+  };
+}
 
-// ===============================================
-// 5. DÉFINITION des ROUTES D'API (avec Knex)
-// ===============================================
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derivedKey = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${derivedKey}`;
+}
 
-// Route de base pour vérifier que le serveur est accessible
-app.get('/', (req, res) => {
-    res.send("API Scandish fonctionne ! (Connecté à SQLite)");
-});
+function verifyPassword(password, storedHash) {
+  const [salt, originalKey] = storedHash.split(':');
+  if (!salt || !originalKey) {
+    return false;
+  }
+  const derivedKey = crypto.scryptSync(password, salt, 64).toString('hex');
+  return crypto.timingSafeEqual(Buffer.from(originalKey, 'hex'), Buffer.from(derivedKey, 'hex'));
+}
 
-// --- Annonces (GET) ---
-// Récupère TOUTES les annonces de la DB (ou utilise le fallback)
-app.get('/api/annonces', async (req, res) => {
-    try {
-        // Tente de récupérer les données de la DB persistante
-        const annonces = await knex('annonces').select('*');
-        
-        if (annonces.length > 0) {
-            // Si des données sont trouvées, les formater et les renvoyer
-            const formattedAnnonces = annonces.map(ad => ({
-                ...ad,
-                vendeur: { id: ad.vendeur_id, nom: ad.vendeur_nom }
-            }));
-            return res.json(formattedAnnonces);
-        }
+function createToken(userId) {
+  const timestamp = Date.now();
+  const payload = `${userId}.${timestamp}`;
+  const signature = crypto.createHmac('sha256', TOKEN_SECRET).update(payload).digest('hex');
+  return Buffer.from(`${payload}.${signature}`).toString('base64url');
+}
 
-        // Si la DB est vide ou n'a pas pu être initialisée (problème SQLite éphémère)
-        throw new Error("DB vide ou non accessible.");
+function parseToken(token) {
+  try {
+    const decoded = Buffer.from(token, 'base64url').toString('utf8');
+    const [userId, timestamp, signature] = decoded.split('.');
 
-    } catch (error) {
-        // En cas d'erreur de connexion à SQLite ou autre, utiliser les données de secours
-        console.warn("ATTENTION: Erreur de connexion à la DB. Utilisation des données de secours. Détail de l'erreur:", error.message);
-        return res.json(FALLBACK_ANNONCES);
+    if (!userId || !timestamp || !signature) {
+      return null;
     }
-});
 
-// Récupère les annonces du Vendeur (simulé pour l'utilisateur connecté)
-app.get('/api/annonces/les-miennes', async (req, res) => {
-    try {
-        // Simuler la récupération des annonces d'un vendeur spécifique (ici ID 1)
-        const mesAnnonces = await knex('annonces')
-            .where({ vendeur_id: 1 }) 
-            .select('id', 'titre', 'prix', 'statut');
+    const payload = `${userId}.${timestamp}`;
+    const expectedSignature = crypto.createHmac('sha256', TOKEN_SECRET).update(payload).digest('hex');
 
-        res.json(mesAnnonces);
-    } catch (error) {
-        console.error("Erreur de récupération des annonces personnelles:", error);
-        // Utiliser une réponse vide ou un message d'erreur si la DB est hors ligne
-        res.status(500).json({ message: "Erreur serveur lors de la récupération de vos annonces." });
+    if (!crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expectedSignature, 'hex'))) {
+      return null;
     }
-});
 
-// --- Annonces (POST : Création) ---
-app.post('/api/annonces', async (req, res) => {
-    const { titre, prix, localisation, imageUrl } = req.body;
-    
-    // Simuler le vendeur et les données pour l'insertion
-    const newAd = {
-        titre,
-        prix,
-        localisation,
-        imageUrl,
-        vendeur_id: 1, // Utilisateur connecté
-        vendeur_nom: "Votre Boutique (DB)"
-    };
-    
-    try {
-        // Insertion dans la DB et récupération de l'ID inséré
-        const [id] = await knex('annonces').insert(newAd); 
-        
-        // Retourner l'objet complet au frontend
-        res.status(201).json({ 
-            message: "Annonce créée avec succès sur la DB.", 
-            data: { id, ...newAd, vendeur: { nom: newAd.vendeur_nom } } 
-        });
-    } catch (error) {
-        // En cas d'échec de l'insertion (ex: DB non persistante)
-        console.error("Erreur lors de la création de l'annonce. La DB n'est peut-être pas persistante:", error);
-        res.status(500).json({ message: "Erreur serveur : Impossible d'enregistrer l'annonce de manière persistante." });
+    if (Date.now() - Number(timestamp) > TOKEN_TTL_MS) {
+      return null;
     }
+
+    return { userId: Number(userId) };
+  } catch (error) {
+    console.error('Erreur de décodage du jeton:', error);
+    return null;
+  }
+}
+
+async function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ message: 'Authentification requise.' });
+  }
+
+  const [type, token] = authHeader.split(' ');
+  if (type !== 'Bearer' || !token) {
+    return res.status(401).json({ message: 'Format du jeton invalide.' });
+  }
+
+  const payload = parseToken(token);
+  if (!payload) {
+    return res.status(401).json({ message: 'Jeton invalide ou expiré.' });
+  }
+
+  const user = await knex('users').where({ id: payload.userId }).first();
+
+  if (!user) {
+    return res.status(401).json({ message: 'Utilisateur inexistant.' });
+  }
+
+  req.user = buildUserResponse(user);
+  return next();
+}
+
+app.get('/', (_req, res) => {
+  res.json({ message: 'API Scandish dédiée aux articles IKEA et JYSK.' });
 });
 
-// --- Routes Simples (Laissées pour l'exemple, à connecter à la DB plus tard) ---
+app.post('/api/auth/register', async (req, res) => {
+  const { name, email, password } = req.body;
 
-app.get('/api/services', (req, res) => {
-    res.json([
-        { id: 1, titre: "MontageExpress 75 (STATIC)", categorie: "Montage", localisation: "Paris, 75011", note: 5, description: "Monteur pro.", prestataire: { id: 104, nom: "MontagePro", avatarUrl: "https://placehold.co/80x80/A3C1C9/FFFFFF?text=M" } },
-    ]);
-});
+  if (!name || !email || !password) {
+    return res.status(400).json({ message: 'Nom, email et mot de passe sont obligatoires.' });
+  }
 
-app.get('/api/hacks', (req, res) => {
-    res.json([
-        { id: 1, titre: "Buffet IVAR et cannage (STATIC)", imageUrl: "https://placehold.co/600x400/D9C7A3/333333?text=Hack+IVAR+DB", createur: { id: 101, nom: "HackQueen" } },
-    ]);
-});
+  const normalisedEmail = String(email).trim().toLowerCase();
 
-app.post('/api/login', (req, res) => {
-    const { email, password } = req.body;
-    if (email === 'user@scandish.com' && password === 'pass') {
-        res.json({ message: "Connexion réussie", token: "jwt-fake-token-12345" });
-    } else {
-        res.status(401).json({ message: "Email ou mot de passe incorrect" });
+  try {
+    const existingUser = await knex('users').where({ email: normalisedEmail }).first();
+
+    if (existingUser) {
+      return res.status(409).json({ message: 'Un compte existe déjà avec cet email.' });
     }
+
+    const passwordHash = hashPassword(password);
+    const [userId] = await knex('users').insert({
+      name: name.trim(),
+      email: normalisedEmail,
+      password_hash: passwordHash,
+    });
+
+    const newUser = await knex('users').where({ id: userId }).first();
+    const token = createToken(newUser.id);
+
+    res.status(201).json({ user: buildUserResponse(newUser), token });
+  } catch (error) {
+    console.error('Erreur lors de la création du compte:', error);
+    res.status(500).json({ message: 'Impossible de créer le compte pour le moment.' });
+  }
 });
 
-app.post('/api/contact', (req, res) => {
-    console.log("Nouveau message reçu:", req.body);
-    res.status(201).json({ message: "Message reçu par le serveur (201 Created) !" });
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email et mot de passe sont obligatoires.' });
+  }
+
+  try {
+    const user = await knex('users').where({ email: String(email).trim().toLowerCase() }).first();
+
+    if (!user || !verifyPassword(password, user.password_hash)) {
+      return res.status(401).json({ message: 'Identifiants invalides.' });
+    }
+
+    const token = createToken(user.id);
+    res.json({ user: buildUserResponse(user), token });
+  } catch (error) {
+    console.error('Erreur lors de la connexion:', error);
+    res.status(500).json({ message: 'Impossible de se connecter pour le moment.' });
+  }
 });
 
-app.put('/api/boutique/settings', (req, res) => {
-    console.log("Paramètres de boutique mis à jour:", req.body);
-    res.json({ message: "Paramètres enregistrés sur le serveur." });
+app.get('/api/auth/me', authMiddleware, (req, res) => {
+  res.json({ user: req.user });
 });
 
+app.get('/api/listings', async (_req, res) => {
+  try {
+    const listings = await knex('listings as l')
+      .leftJoin('users as u', 'l.seller_id', 'u.id')
+      .select(
+        'l.id',
+        'l.title',
+        'l.description',
+        'l.price',
+        'l.brand',
+        'l.location',
+        'l.image_url',
+        'l.created_at',
+        'l.updated_at',
+        'u.id as seller_id',
+        'u.name as seller_name'
+      )
+      .orderBy('l.created_at', 'desc');
 
-// 6. Démarrage du Serveur
+    res.json(
+      listings.map((listing) => ({
+        id: listing.id,
+        title: listing.title,
+        description: listing.description,
+        price: Number(listing.price),
+        brand: listing.brand,
+        location: listing.location,
+        imageUrl: listing.image_url,
+        createdAt: listing.created_at,
+        updatedAt: listing.updated_at,
+        seller: {
+          id: listing.seller_id,
+          name: listing.seller_name,
+        },
+      }))
+    );
+  } catch (error) {
+    console.error('Erreur lors de la récupération des annonces:', error);
+    res.status(500).json({ message: 'Impossible de récupérer les annonces pour le moment.' });
+  }
+});
+
+app.get('/api/listings/:id', async (req, res) => {
+  const listingId = Number(req.params.id);
+
+  if (Number.isNaN(listingId)) {
+    return res.status(400).json({ message: 'Identifiant invalide.' });
+  }
+
+  try {
+    const listing = await knex('listings as l')
+      .leftJoin('users as u', 'l.seller_id', 'u.id')
+      .where('l.id', listingId)
+      .select(
+        'l.id',
+        'l.title',
+        'l.description',
+        'l.price',
+        'l.brand',
+        'l.location',
+        'l.image_url',
+        'l.created_at',
+        'l.updated_at',
+        'u.id as seller_id',
+        'u.name as seller_name'
+      )
+      .first();
+
+    if (!listing) {
+      return res.status(404).json({ message: "L'annonce demandée est introuvable." });
+    }
+
+    res.json({
+      id: listing.id,
+      title: listing.title,
+      description: listing.description,
+      price: Number(listing.price),
+      brand: listing.brand,
+      location: listing.location,
+      imageUrl: listing.image_url,
+      createdAt: listing.created_at,
+      updatedAt: listing.updated_at,
+      seller: {
+        id: listing.seller_id,
+        name: listing.seller_name,
+      },
+    });
+  } catch (error) {
+    console.error("Erreur lors de la récupération de l'annonce:", error);
+    res.status(500).json({ message: "Impossible de récupérer l'annonce pour le moment." });
+  }
+});
+
+app.get('/api/me/listings', authMiddleware, async (req, res) => {
+  try {
+    const listings = await knex('listings').where({ seller_id: req.user.id }).orderBy('created_at', 'desc');
+
+    res.json(
+      listings.map((listing) => ({
+        id: listing.id,
+        title: listing.title,
+        description: listing.description,
+        price: Number(listing.price),
+        brand: listing.brand,
+        location: listing.location,
+        imageUrl: listing.image_url,
+        createdAt: listing.created_at,
+        updatedAt: listing.updated_at,
+      }))
+    );
+  } catch (error) {
+    console.error('Erreur lors de la récupération des annonces utilisateur:', error);
+    res.status(500).json({ message: 'Impossible de récupérer vos annonces pour le moment.' });
+  }
+});
+
+app.post('/api/listings', authMiddleware, async (req, res) => {
+  const { title, description, price, brand, location, imageUrl } = req.body;
+
+  if (!title || price === undefined || !brand || !location) {
+    return res.status(400).json({ message: 'Titre, prix, marque et localisation sont obligatoires.' });
+  }
+
+  const normalisedBrand = String(brand).trim().toUpperCase();
+  if (!ALLOWED_BRANDS.includes(normalisedBrand)) {
+    return res.status(400).json({ message: 'Seules les marques IKEA ou JYSK sont autorisées.' });
+  }
+
+  const numericPrice = Number(price);
+  if (Number.isNaN(numericPrice) || numericPrice <= 0) {
+    return res.status(400).json({ message: 'Le prix doit être un nombre positif.' });
+  }
+
+  try {
+    const [listingId] = await knex('listings').insert({
+      title: title.trim(),
+      description: description ? String(description).trim() : null,
+      price: numericPrice,
+      brand: normalisedBrand,
+      location: location.trim(),
+      image_url: imageUrl ? String(imageUrl).trim() : null,
+      seller_id: req.user.id,
+    });
+
+    const created = await knex('listings').where({ id: listingId }).first();
+
+    res.status(201).json({
+      id: created.id,
+      title: created.title,
+      description: created.description,
+      price: Number(created.price),
+      brand: created.brand,
+      location: created.location,
+      imageUrl: created.image_url,
+      createdAt: created.created_at,
+      updatedAt: created.updated_at,
+      seller: {
+        id: req.user.id,
+        name: req.user.name,
+      },
+    });
+  } catch (error) {
+    console.error('Erreur lors de la création de l\'annonce:', error);
+    res.status(500).json({ message: "Impossible de créer l'annonce pour le moment." });
+  }
+});
+
+app.post('/api/listings/:id/save', authMiddleware, async (req, res) => {
+  const listingId = Number(req.params.id);
+
+  if (Number.isNaN(listingId)) {
+    return res.status(400).json({ message: 'Identifiant invalide.' });
+  }
+
+  try {
+    const listing = await knex('listings').where({ id: listingId }).first();
+
+    if (!listing) {
+      return res.status(404).json({ message: "L'annonce demandée est introuvable." });
+    }
+
+    await knex('saved_listings')
+      .insert({ user_id: req.user.id, listing_id: listingId })
+      .onConflict(['user_id', 'listing_id'])
+      .ignore();
+
+    res.status(201).json({ message: "L'annonce a été ajoutée à vos favoris." });
+  } catch (error) {
+    console.error('Erreur lors de la sauvegarde de l\'annonce:', error);
+    res.status(500).json({ message: "Impossible d'enregistrer l'annonce pour le moment." });
+  }
+});
+
+app.delete('/api/listings/:id/save', authMiddleware, async (req, res) => {
+  const listingId = Number(req.params.id);
+
+  if (Number.isNaN(listingId)) {
+    return res.status(400).json({ message: 'Identifiant invalide.' });
+  }
+
+  try {
+    await knex('saved_listings').where({ user_id: req.user.id, listing_id: listingId }).del();
+    res.json({ message: "L'annonce a été retirée de vos favoris." });
+  } catch (error) {
+    console.error('Erreur lors de la suppression de la sauvegarde:', error);
+    res.status(500).json({ message: 'Impossible de retirer cette annonce pour le moment.' });
+  }
+});
+
+app.get('/api/me/saved', authMiddleware, async (req, res) => {
+  try {
+    const saved = await knex('saved_listings as s')
+      .join('listings as l', 's.listing_id', 'l.id')
+      .join('users as u', 'l.seller_id', 'u.id')
+      .where('s.user_id', req.user.id)
+      .select(
+        'l.id as listing_id',
+        'l.title',
+        'l.description',
+        'l.price',
+        'l.brand',
+        'l.location',
+        'l.image_url',
+        'l.created_at',
+        'l.updated_at',
+        'u.id as seller_id',
+        'u.name as seller_name'
+      )
+      .orderBy('l.created_at', 'desc');
+
+    res.json(
+      saved.map((listing) => ({
+        id: listing.listing_id,
+        title: listing.title,
+        description: listing.description,
+        price: Number(listing.price),
+        brand: listing.brand,
+        location: listing.location,
+        imageUrl: listing.image_url,
+        createdAt: listing.created_at,
+        updatedAt: listing.updated_at,
+        seller: {
+          id: listing.seller_id,
+          name: listing.seller_name,
+        },
+      }))
+    );
+  } catch (error) {
+    console.error('Erreur lors de la récupération des favoris:', error);
+    res.status(500).json({ message: 'Impossible de récupérer vos annonces sauvegardées pour le moment.' });
+  }
+});
+
+app.post('/api/listings/:id/messages', authMiddleware, async (req, res) => {
+  const listingId = Number(req.params.id);
+  const { content } = req.body;
+
+  if (Number.isNaN(listingId)) {
+    return res.status(400).json({ message: 'Identifiant invalide.' });
+  }
+
+  if (!content || !content.trim()) {
+    return res.status(400).json({ message: 'Le contenu du message est obligatoire.' });
+  }
+
+  try {
+    const listing = await knex('listings').where({ id: listingId }).first();
+
+    if (!listing) {
+      return res.status(404).json({ message: "L'annonce demandée est introuvable." });
+    }
+
+    const recipientId = listing.seller_id;
+
+    const [messageId] = await knex('messages').insert({
+      listing_id: listingId,
+      sender_id: req.user.id,
+      recipient_id: recipientId,
+      content: content.trim(),
+    });
+
+    const message = await knex('messages').where({ id: messageId }).first();
+
+    res.status(201).json({
+      id: message.id,
+      listingId: message.listing_id,
+      senderId: message.sender_id,
+      recipientId: message.recipient_id,
+      content: message.content,
+      createdAt: message.created_at,
+      updatedAt: message.updated_at,
+    });
+  } catch (error) {
+    console.error('Erreur lors de l\'envoi du message:', error);
+    res.status(500).json({ message: "Impossible d'envoyer le message pour le moment." });
+  }
+});
+
+app.get('/api/messages', authMiddleware, async (req, res) => {
+  try {
+    const messages = await knex('messages as m')
+      .leftJoin('listings as l', 'm.listing_id', 'l.id')
+      .leftJoin('users as sender', 'm.sender_id', 'sender.id')
+      .leftJoin('users as recipient', 'm.recipient_id', 'recipient.id')
+      .where(function whereBuilder() {
+        this.where('m.sender_id', req.user.id).orWhere('m.recipient_id', req.user.id);
+      })
+      .select(
+        'm.id',
+        'm.content',
+        'm.created_at',
+        'm.updated_at',
+        'l.id as listing_id',
+        'l.title as listing_title',
+        'sender.id as sender_id',
+        'sender.name as sender_name',
+        'recipient.id as recipient_id',
+        'recipient.name as recipient_name'
+      )
+      .orderBy('m.created_at', 'asc');
+
+    res.json(
+      messages.map((message) => ({
+        id: message.id,
+        content: message.content,
+        createdAt: message.created_at,
+        updatedAt: message.updated_at,
+        listing: {
+          id: message.listing_id,
+          title: message.listing_title,
+        },
+        sender: {
+          id: message.sender_id,
+          name: message.sender_name,
+        },
+        recipient: {
+          id: message.recipient_id,
+          name: message.recipient_name,
+        },
+      }))
+    );
+  } catch (error) {
+    console.error('Erreur lors de la récupération des messages:', error);
+    res.status(500).json({ message: 'Impossible de récupérer vos messages pour le moment.' });
+  }
+});
+
+app.get('/api/listings/:id/messages', authMiddleware, async (req, res) => {
+  const listingId = Number(req.params.id);
+
+  if (Number.isNaN(listingId)) {
+    return res.status(400).json({ message: 'Identifiant invalide.' });
+  }
+
+  try {
+    const listing = await knex('listings').where({ id: listingId }).first();
+
+    if (!listing) {
+      return res.status(404).json({ message: "L'annonce demandée est introuvable." });
+    }
+
+    if (listing.seller_id !== req.user.id) {
+      const isParticipant = await knex('messages')
+        .where({ listing_id: listingId })
+        .andWhere(function participantBuilder() {
+          this.where('sender_id', req.user.id).orWhere('recipient_id', req.user.id);
+        })
+        .first();
+
+      if (!isParticipant) {
+        return res.status(403).json({ message: 'Accès refusé pour cette conversation.' });
+      }
+    }
+
+    const messages = await knex('messages as m')
+      .leftJoin('users as sender', 'm.sender_id', 'sender.id')
+      .leftJoin('users as recipient', 'm.recipient_id', 'recipient.id')
+      .where('m.listing_id', listingId)
+      .orderBy('m.created_at', 'asc')
+      .select(
+        'm.id',
+        'm.content',
+        'm.created_at',
+        'm.updated_at',
+        'sender.id as sender_id',
+        'sender.name as sender_name',
+        'recipient.id as recipient_id',
+        'recipient.name as recipient_name'
+      );
+
+    res.json(
+      messages.map((message) => ({
+        id: message.id,
+        content: message.content,
+        createdAt: message.created_at,
+        updatedAt: message.updated_at,
+        sender: {
+          id: message.sender_id,
+          name: message.sender_name,
+        },
+        recipient: {
+          id: message.recipient_id,
+          name: message.recipient_name,
+        },
+      }))
+    );
+  } catch (error) {
+    console.error('Erreur lors de la récupération des messages par annonce:', error);
+    res.status(500).json({ message: 'Impossible de récupérer les messages pour le moment.' });
+  }
+});
+
 app.listen(PORT, () => {
-    console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
-    console.log(`📡 Tentative de connexion à la DB SQLite : scandish.sqlite`);
+  console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
 });

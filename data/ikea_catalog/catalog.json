@@ -1,0 +1,30 @@
+[
+  {
+    "model": "BILLY",
+    "name": "Bibliothèque BILLY",
+    "description": "Bibliothèque étroite avec étagères ajustables.",
+    "referenceImage": "data/ikea_catalog/billy.ppm",
+    "keywords": ["etagere", "bookcase", "biblio"]
+  },
+  {
+    "model": "STRANDMON",
+    "name": "Fauteuil STRANDMON",
+    "description": "Fauteuil haut dossier style wing chair.",
+    "referenceImage": "data/ikea_catalog/strandmon.ppm",
+    "keywords": ["fauteuil", "wing", "chair"]
+  },
+  {
+    "model": "LACK",
+    "name": "Table basse LACK",
+    "description": "Petite table d'appoint minimaliste.",
+    "referenceImage": "data/ikea_catalog/lack.ppm",
+    "keywords": ["table", "basse", "coffee"]
+  },
+  {
+    "model": "MALM",
+    "name": "Lit MALM",
+    "description": "Cadre de lit minimaliste avec tête de lit.",
+    "referenceImage": "data/ikea_catalog/malm.ppm",
+    "keywords": ["lit", "bed", "cadre"]
+  }
+]

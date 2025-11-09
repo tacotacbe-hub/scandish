@@ -4,6 +4,7 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
+const { recognizer } = require('./services/ikeaRecognizer');
 
 // --- Initialisation de Knex et de la DB ---
 // Utilise le knexfile que nous avons configuré pour se connecter à SQLite en local.
@@ -138,6 +139,43 @@ app.post('/api/contact', (req, res) => {
 app.put('/api/boutique/settings', (req, res) => {
     console.log("Paramètres de boutique mis à jour:", req.body);
     res.json({ message: "Paramètres enregistrés sur le serveur." });
+});
+
+// --- Reconnaissance de meubles IKEA ---
+app.post('/api/ikea/recognition', (req, res) => {
+    try {
+        const { imageUrl, imageBase64 } = req.body || {};
+
+        if (!imageUrl && !imageBase64) {
+            return res.status(400).json({
+                message: "Veuillez fournir une URL ou une image encodée en base64.",
+            });
+        }
+
+        const result = recognizer.recognize({ imageUrl, imageBase64 });
+
+        if (!result) {
+            return res.status(404).json({
+                message: "Aucun modèle IKEA correspondant n'a été trouvé pour cette image.",
+            });
+        }
+
+        return res.json({
+            brand: result.brand,
+            model: result.model,
+            name: result.name,
+            description: result.description,
+            confidence: result.confidence,
+            method: result.method,
+            distance: typeof result.distance === 'number' ? result.distance : null,
+        });
+    } catch (error) {
+        console.error('Erreur de reconnaissance IKEA:', error.message);
+        return res.status(500).json({
+            message: "Erreur lors de la tentative de reconnaissance du meuble.",
+            detail: error.message,
+        });
+    }
 });
 
 
